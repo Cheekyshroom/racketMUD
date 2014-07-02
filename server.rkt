@@ -22,10 +22,22 @@
 	  (loop)))
       (get-output-string st)))
 
-  (define (read-all-chars-blocking port)
+  (define (read-all-chars-strip port strip-fn)
+    (let ((st (open-output-string)))
+      (let loop ()
+	(when (char-ready? port)
+	  (let ((r (read-char port)))
+	    (when (strip-fn r)
+	      (display r st)))
+	  (loop)))
+      (get-output-string st)))
+
+  (define (read-all-chars-blocking port (strip-fn #f))
     (let loop ()
       (if (char-ready? port)
-	  (read-all-chars port)
+	  (if strip-fn
+	      (read-all-chars-strip port strip-fn)
+	      (read-all-chars port))
 	  (loop))))
 
   (define (begin-server)
@@ -34,14 +46,26 @@
     ;;accept an incoming connection on that port
     (define-values (s-in s-out) (tcp-accept server)) 
 
-    (read-all-chars-blocking s-in)
-    (flush-output)
-    (display "Goodbye\n" s-out)
-    (flush-output s-out)
-
-    ;(let loop ((its 0))
-      
-     ; (loop (add1 its)))
+    (let loop ((its 10)
+	       (last-line #f))
+      (unless (or (equal? last-line "quit")
+		  (zero? its))
+	;(sleep 1)
+	
+	(let ((r (read-all-chars-blocking 
+		  s-in 
+		  (lambda (c)
+		    (cond [(eq? c #\return) #f]
+			  [(eq? c #\newline) #f]
+			  [else #t])))))
+	  (display "You said :: " s-out)
+	  (display r s-out)
+	  (display "\r\n" s-out)
+	  (flush-output s-out)
+	  (display r)
+	  (newline)
+	  (flush-output)
+	  (loop (sub1 its) r))))
 
     ;;close connections to client
     (close-connections s-in s-out)
