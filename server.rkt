@@ -1,6 +1,5 @@
 (module rMUD-server racket/base
   (require racket/tcp)
-  (require racket/port)
   (require racket/cmdline)
 
   (define outport (make-parameter 12345))
@@ -42,22 +41,25 @@
 
   (define (begin-server)
     ;;start listening on our specified port
-    (define server (tcp-listen (outport)))
+    (define server (tcp-listen (if (string? (outport))
+				   (string->number (outport))
+				   (outport))))
     ;;accept an incoming connection on that port
-    (define-values (s-in s-out) (tcp-accept server)) 
+    (define-values (s-in s-out) (tcp-accept server))
 
+    ;;loop to communicate with user
     (let loop ((its 10)
 	       (last-line #f))
+      ;;we'll exit if its = 0 or the client sent "quit" last cycle
       (unless (or (equal? last-line "quit")
 		  (zero? its))
-	;(sleep 1)
-	
-	(let ((r (read-all-chars-blocking 
-		  s-in 
-		  (lambda (c)
-		    (cond [(eq? c #\return) #f]
-			  [(eq? c #\newline) #f]
-			  [else #t])))))
+	;;read and strip out newlines and carriage returns
+	(let ((r (read-all-chars-blocking s-in 
+					  (lambda (c)
+					    (cond [(eq? c #\return) #f]
+						  [(eq? c #\newline) #f]
+						  [else #t])))))
+	  ;;silly formatting stuff
 	  (display "You said :: " s-out)
 	  (display r s-out)
 	  (display "\r\n" s-out)
@@ -71,4 +73,5 @@
     (close-connections s-in s-out)
     (tcp-close server))
 
-  (provide begin-server outport hostname))
+  (provide begin-server outport hostname)
+  (begin-server))
