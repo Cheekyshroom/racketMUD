@@ -2,7 +2,7 @@
   (require racket/tcp)
   (require racket/cmdline)
 
-  (define outport (make-parameter 12346))
+  (define outport (make-parameter 12346)) ;make this set by tcp-listen
   (define hostname (make-parameter "localhost"))
   (define args (current-command-line-arguments))
   (when (= 2 (vector-length args))
@@ -63,10 +63,6 @@
 	  (newline)
 	  (flush-output)
 	  (loop (sub1 its) r)))))
-
-  (define (accept-handle-close-serv server (continue #f))
-    (define-values (s-in s-out) (tcp-accept server))
-    (accept-handle-close s-in s-out continue))
 
   (define (accept-handle-close in out continue)
     (handle in out #f continue)
