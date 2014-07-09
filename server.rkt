@@ -9,6 +9,10 @@
     (outport (vector-ref args 0))
     (hostname (vector-ref args 1)))
 
+  (define (close-connections in out)
+    (close-input-port in)
+    (close-output-port out))
+
   (struct user
     ([log #:mutable]
      [in]
@@ -35,30 +39,44 @@
 	  global-kill))
 
   (struct userlist
-    ([users
-      #:mutable]
-     [in
-      #:mutable]
-     [out
-      #:mutable]
+    ([users #:mutable]
+     [count #:mutable]
      [global-kill]))
 
   (define (make-userlist (global-kill (box #f)))
     (userlist '()
-	      '()
-	      '()
+	      0
 	      global-kill)) ;global-kill should be a box
+
+  ;;applies a function to each user in a userlist
+  (define (apply-userlist fn ulist)
+    (let inner ((users (userlist-users ulist)))
+      (unless (null? users)
+	(fn (car users))
+	(inner (cdr users)))))
+
+  ;;applies a function to each user in a userlist, and removes the users
+  ;;that it returns false for
+  (define (apply-remove-userlist fn ulist)
+    (let inner ((users (userlist-users ulist)))
+      (cond [(null? users) ;end of list
+	     '()]
+	    [(not (fn (car users))) ;function applies to it and is false
+	     (inner (cdr users))]
+	    [else ;function has applied and returned true
+	     (cons (car users) (inner (cdr users)))])))
+
+  (define (connection-killed-close! user)
+    (if (or (user-kill user)
+	    (unbox (user-global-kill user))) ;if the user is killed in any way
+	(begin 
+	  (close-connections (user-in user) (user-out user)) ;close their connections
+	  #f) ;and signal that apply-remove-userlist can remove it
+	#t)) ;else say that it can't remove it
   
   (define (add-user! ulist user)
-    (set-userlist-users! (cons user (userlist-users ulist)))
-    (set-userlist-in! (cons (user-in user)
-			    (userlist-in ulist)))
-    (set-userlist-out! (cons (user-out user)
-			     (userlist-out ulist))))
-
-  (define (close-connections in out)
-    (close-input-port in)
-    (close-output-port out))
+    (set-userlist-users! ulist (cons user (userlist-users ulist)))
+    (set-userlist-count! ulist (add1 (userlist-count ulist))))
 
   (define (read-all-chars port)
     (let ((st (open-output-string)))
@@ -97,6 +115,11 @@
 		 (flush-output (user-out user))
 		 (set-user-kill! user #t) ;set the user's killswitch to true
 		 #t]
+		[(equal? "global-quit" str) ;if we're killing the server
+		 (display "Server killed\n")
+		 (flush-output)
+		 (set-box! (user-global-kill user) #t)
+		 #t]
 		[else ;else handle it normally
 		 (display "You said: " (user-out user))
 		 (display str (user-out user))
@@ -104,6 +127,7 @@
 		 (flush-output (user-out user))
 		 (display str)
 		 (newline)
+		 (flush-output)
 		 #t]))))
 
   ;;gets input from the users in socket, then handles it
@@ -133,15 +157,14 @@
     (define global-kill (box #f))
     (define users (make-userlist global-kill))
     
-    (let loop ((usern 0))
-      (let block () ;;block until someone wants to connect
-	(unless (or (tcp-accept-ready? server)
-		    (unbox global-kill)) ;wait until we have an incoming connection
-	  (block)))
-      (unless (unbox global-kill) ;;when we know we do, check if we -can- accept it, if not end
-	(accept-add-user! users server) ;builds up a list of users
-	
-	(loop (add1 usern))))
+    (let loop ()
+      (unless (unbox global-kill)
+	(when (tcp-accept-ready? server) ;if a connection is pending
+	  (accept-add-user! users server)) ;add a user from that connection
+	;;here we handle the users
+	(apply-userlist input-handle users)
+	(apply-remove-userlist connection-killed-close! users)
+	(loop)))
     (tcp-close server))
 
-  (provide begin-server outport handle-string (struct-out user)))
+  (provide begin-server outport (struct-out user) handle-string))
