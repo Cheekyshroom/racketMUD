@@ -9,6 +9,53 @@
     (outport (vector-ref args 0))
     (hostname (vector-ref args 1)))
 
+  (struct user
+    ([log #:mutable]
+     [in]
+     [out]
+     [kill #:mutable]
+     [global-kill])
+    #:transparent)
+
+  (define (add-log! user str)
+    (set-user-log! user (cons str (user-log user))))
+
+  (define (print-log user)
+    (let inner ((log (user-log user)))
+      (unless (null? log)
+	(inner (cdr log))
+	(display (car log))
+	(newline))))
+
+  (define (make-user (in #f) (out #f) (global-kill #f))
+    (user '() 
+	  (if in in (current-input-port))
+	  (if out out (current-output-port))
+	  #f
+	  global-kill))
+
+  (struct userlist
+    ([users
+      #:mutable]
+     [in
+      #:mutable]
+     [out
+      #:mutable]
+     [global-kill]))
+
+  (define (make-userlist (global-kill (box #f)))
+    (userlist '()
+	      '()
+	      '()
+	      global-kill)) ;global-kill should be a box
+  
+  (define (add-user! ulist user)
+    (set-userlist-users! (cons user (userlist-users ulist)))
+    (set-userlist-in! (cons (user-in user)
+			    (userlist-in ulist)))
+    (set-userlist-out! (cons (user-out user)
+			     (userlist-out ulist))))
+
   (define (close-connections in out)
     (close-input-port in)
     (close-output-port out))
@@ -39,57 +86,62 @@
 	      (read-all-chars port))
 	  (loop))))
 
-  (define (handle in out (user #f) (continue #f))
-    (let loop ((its 10)
-	       (last-line #f))
-      ;;we'll exit if its = 0 or the client sent "quit" last cycle
-      (unless (or (equal? last-line "quit")
-		  (zero? its)
-		  (if continue
-		      (not (unbox continue))
-		      #f))
-	;;read and strip out newlines and carriage returns
-	(let ((r (read-all-chars-blocking in 
-					  (lambda (c)
-					    (cond [(eq? c #\return) #f]
-						  [(eq? c #\newline) #f]
-						  [else #t])))))
-	  ;;silly formatting stuff
-	  (display "You said: " out)
-	  (display r out)
-	  (display "\r\n" out)
-	  (flush-output out)
-	  (display r)
-	  (newline)
-	  (flush-output)
-	  (loop (sub1 its) r)))))
+  ;string user -> returns false if input wasn't recieved
+  (define (handle-string user str)
+    (if (equal? "" str) ;if they didn't say anything
+	#f
+	(begin ;if they did
+	  (add-log! user str) ;add it to our message log
+	  (cond [(equal? "quit" str) ;if it was "quit" (or some other quit message in the future
+		 (display "Bye\r\n" (user-out user)) 
+		 (flush-output (user-out user))
+		 (set-user-kill! user #t) ;set the user's killswitch to true
+		 #t]
+		[else ;else handle it normally
+		 (display "You said: " (user-out user))
+		 (display str (user-out user))
+		 (display "\r\n" (user-out user))
+		 (flush-output (user-out user))
+		 (display str)
+		 (newline)
+		 #t]))))
 
-  (define (accept-handle-close in out continue)
-    (handle in out #f continue)
-    (close-connections in out)
-    (set-box! continue #f))
+  ;;gets input from the users in socket, then handles it
+  (define (input-handle user)
+    (unless (or (user-kill user)
+		(unbox (user-global-kill user)))
+      (let ((str (read-all-chars-strip (user-in user)
+				       (lambda (c)
+					 (cond [(eq? c #\return) #f]
+					       [(eq? c #\newline) #f]
+					       [else #t])))))
+	(handle-string user str))))
 
-  ;;close-server = a box that allows this connection to stop receiving incoming connections
-  (define (accept-thread-handle-continue server continue)
+  (define (accept-make-user server global-kill)
     (define-values (s-in s-out) (tcp-accept server))
-    (thread (lambda ()
-	      (accept-handle-close s-in s-out continue))))
+    (make-user s-in s-out global-kill))
+
+  (define (accept-add-user! ulist server)
+    (add-user! ulist (accept-make-user server (userlist-global-kill ulist))))
 
   (define (begin-server)
     ;;start listening on our specified port
     (define server (tcp-listen (if (string? (outport))
 				   (string->number (outport))
 				   (outport))))
+
+    (define global-kill (box #f))
+    (define users (make-userlist global-kill))
     
-    (define continue (box #t))
     (let loop ((usern 0))
-      (let block ()
+      (let block () ;;block until someone wants to connect
 	(unless (or (tcp-accept-ready? server)
-		    (not (unbox continue))) ;wait until we have an incoming connection
+		    (unbox global-kill)) ;wait until we have an incoming connection
 	  (block)))
-      (when (unbox continue) ;;when we know we do, check if we -can- accept it, if not end
-	(accept-thread-handle-continue server continue)
+      (unless (unbox global-kill) ;;when we know we do, check if we -can- accept it, if not end
+	(accept-add-user! users server) ;builds up a list of users
+	
 	(loop (add1 usern))))
     (tcp-close server))
 
-  (provide begin-server outport))
+  (provide begin-server outport handle-string (struct-out user)))
