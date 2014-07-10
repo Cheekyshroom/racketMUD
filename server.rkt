@@ -2,7 +2,7 @@
   (require racket/tcp)
   (require racket/cmdline)
 
-  (define outport (make-parameter 12346)) ;make this set by tcp-listen
+  (define outport (make-parameter 12345)) ;make this set by tcp-listen
   (define hostname (make-parameter "localhost"))
   (define args (current-command-line-arguments))
   (when (= 2 (vector-length args))
@@ -14,7 +14,8 @@
     (close-output-port out))
 
   (struct user
-    ([log #:mutable]
+    ([parent]
+     [log #:mutable]
      [in]
      [out]
      [kill #:mutable]
@@ -31,8 +32,9 @@
 	(display (car log))
 	(newline))))
 
-  (define (make-user (in #f) (out #f) (global-kill #f))
-    (user '() 
+  (define (make-user (parent #f) (in #f) (out #f) (global-kill #f))
+    (user parent
+	  '() 
 	  (if in in (current-input-port))
 	  (if out out (current-output-port))
 	  #f
@@ -41,7 +43,8 @@
   (struct userlist
     ([users #:mutable]
      [count #:mutable]
-     [global-kill]))
+     [global-kill])
+    #:transparent)
 
   (define (make-userlist (global-kill (box #f)))
     (userlist '()
@@ -62,6 +65,7 @@
       (cond [(null? users) ;end of list
 	     '()]
 	    [(not (fn (car users))) ;function applies to it and is false
+	     (set-userlist-count! ulist (sub1 (userlist-count ulist))) ;decrement user count
 	     (inner (cdr users))]
 	    [else ;function has applied and returned true
 	     (cons (car users) (inner (cdr users)))])))
@@ -75,7 +79,9 @@
 	#t)) ;else say that it can't remove it
   
   (define (add-user! ulist user)
+    ;add a user to the ulist
     (set-userlist-users! ulist (cons user (userlist-users ulist)))
+    ;increment user count
     (set-userlist-count! ulist (add1 (userlist-count ulist))))
 
   (define (read-all-chars port)
@@ -121,6 +127,8 @@
 		 (set-box! (user-global-kill user) #t)
 		 #t]
 		[else ;else handle it normally
+		 (display (userlist-count (user-parent user)) (user-out user))
+		 (display " Users -> " (user-out user))
 		 (display "You said: " (user-out user))
 		 (display str (user-out user))
 		 (display "\r\n" (user-out user))
@@ -141,12 +149,12 @@
 					       [else #t])))))
 	(handle-string user str))))
 
-  (define (accept-make-user server global-kill)
+  (define (accept-make-user server ulist)
     (define-values (s-in s-out) (tcp-accept server))
-    (make-user s-in s-out global-kill))
+    (make-user ulist s-in s-out (userlist-global-kill ulist)))
 
   (define (accept-add-user! ulist server)
-    (add-user! ulist (accept-make-user server (userlist-global-kill ulist))))
+    (add-user! ulist (accept-make-user server ulist)))
 
   (define (begin-server)
     ;;start listening on our specified port
@@ -163,7 +171,7 @@
 	  (accept-add-user! users server)) ;add a user from that connection
 	;;here we handle the users
 	(apply-userlist input-handle users)
-	(apply-remove-userlist connection-killed-close! users)
+	(set-userlist-users! users (apply-remove-userlist connection-killed-close! users))
 	(loop)))
     (tcp-close server))
 
