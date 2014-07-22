@@ -2,6 +2,9 @@
   (require racket/tcp)
   (require racket/cmdline)
 
+  (require "map.rkt")
+  (require "user.rkt")
+
   (define outport (make-parameter 12345)) ;make this set by tcp-listen
   (define hostname (make-parameter "localhost"))
   (define args (current-command-line-arguments))
@@ -13,64 +16,6 @@
     (close-input-port in)
     (close-output-port out))
 
-  (struct user
-    ([parent]
-     [log #:mutable]
-     [in]
-     [out]
-     [kill #:mutable]
-     [global-kill]
-     [name #:mutable]))
-
-  (define (add-log! user str)
-    (set-user-log! user (cons str (user-log user))))
-
-  (define (print-log user)
-    (let inner ((log (user-log user)))
-      (unless (null? log)
-	(inner (cdr log))
-	(display (car log))
-	(newline))))
-
-  (define (make-user (parent #f) (in #f) (out #f) (global-kill #f) (name "nameless-user"))
-    (user parent
-	  '() 
-	  (if in in (current-input-port))
-	  (if out out (current-output-port))
-	  #f
-	  global-kill
-	  name))
-
-  (struct userlist
-    ([users #:mutable]
-     [count #:mutable]
-     [global-kill])
-    #:transparent)
-
-  (define (make-userlist (global-kill (box #f)))
-    (userlist '()
-	      0
-	      global-kill)) ;global-kill should be a box
-
-  ;;applies a function to each user in a userlist
-  (define (apply-userlist fn ulist . rest)
-    (let inner ((users (userlist-users ulist)))
-      (unless (null? users)
-	(fn (car users) rest)
-	(inner (cdr users)))))
-
-  ;;applies a function to each user in a userlist, and removes the users
-  ;;that it returns false for
-  (define (apply-remove-userlist fn ulist . rest)
-    (let inner ((users (userlist-users ulist)))
-      (cond [(null? users) ;end of list
-	     '()]
-	    [(not (fn (car users) rest)) ;function applies to it and is false
-	     (set-userlist-count! ulist (sub1 (userlist-count ulist))) ;decrement user count
-	     (inner (cdr users))]
-	    [else ;function has applied and returned true
-	     (cons (car users) (inner (cdr users)))])))
-
   (define (connection-killed-close! user . rest)
     (if (or (user-kill user)
 	    (unbox (user-global-kill user))) ;if the user is killed in any way
@@ -78,12 +23,6 @@
 	  (close-connections (user-in user) (user-out user)) ;close their connections
 	  #f) ;and signal that apply-remove-userlist can remove it
 	#t)) ;else say that it can't remove it
-  
-  (define (add-user! ulist user)
-    ;add a user to the ulist
-    (set-userlist-users! ulist (cons user (userlist-users ulist)))
-    ;increment user count
-    (set-userlist-count! ulist (add1 (userlist-count ulist))))
 
   (define (read-all-chars port)
     (let ((st (open-output-string)))
@@ -133,7 +72,8 @@
 				      last
 				      strs)]))
 		      (lambda (x)
-			(not (equal? "" x)))))
+			(not (or (equal? "" x)
+				 (equal? "\n" x))))))
 
   ;returns true if a list is longer than a certain length, O(len)
   (define (list-longer l len)
@@ -203,6 +143,12 @@
   (define (accept-add-user! ulist server)
     (add-user! ulist (accept-make-user server ulist)))
 
+  (define (close-all-connections ulist server)
+    (apply-userlist (lambda (user . rest)
+		      (close-connections (user-in user) (user-out user)))
+		    ulist)
+    (tcp-close server))
+
   (define (begin-server (port #f))
     ;;start listening on our specified port
     (define server (tcp-listen (if port
@@ -222,6 +168,6 @@
 	(apply-userlist input-handle users)
 	(set-userlist-users! users (apply-remove-userlist connection-killed-close! users))
 	(loop)))
-    (tcp-close server))
+    (close-all-connections users server))
 
   (provide begin-server outport))
