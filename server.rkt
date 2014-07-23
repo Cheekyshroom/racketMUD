@@ -4,6 +4,7 @@
 
   (require "map.rkt")
   (require "user.rkt")
+  (require "parsing.rkt")
 
   (define outport (make-parameter 12345)) ;make this set by tcp-listen
   (define hostname (make-parameter "localhost"))
@@ -19,7 +20,7 @@
   (define (connection-killed-close! user . rest)
     (if (or (user-kill user)
 	    (unbox (user-global-kill user))) ;if the user is killed in any way
-	(begin 
+	(begin
 	  (close-connections (user-in user) (user-out user)) ;close their connections
 	  #f) ;and signal that apply-remove-userlist can remove it
 	#t)) ;else say that it can't remove it
@@ -50,81 +51,73 @@
 	      (read-all-chars port))
 	  (loop))))
 
-  ;;removes if strip-fn returns false
-  (define (my-reverse-strip in strip-fn (out '()))
-    (if (not (null? in))
-	(if (strip-fn (car in))
-	    (my-reverse-strip (cdr in) strip-fn (cons (car in) out))
-	    (my-reverse-strip (cdr in) strip-fn out))
-	out))
-
-  (define (split-str str sep (len (string-length str)))
-    (my-reverse-strip (let inner ((ind 0)
-				  (last 0)
-				  (strs '()))
-			(cond [(= ind len)
-			       (cons (substring str last ind) strs)]
-			      [(eq? (string-ref str ind) sep)
-			       (inner (add1 ind) (add1 ind)
-				      (cons (substring str last ind) strs))]
-			      [else
-			       (inner (add1 ind)
-				      last
-				      strs)]))
-		      (lambda (x)
-			(not (or (equal? "" x)
-				 (equal? "\n" x))))))
-
-  ;returns true if a list is longer than a certain length, O(len)
-  (define (list-longer l len)
-    (let inner ((i 0)
-		(lis l))
-      (cond [(null? lis)
-	     #f]
-	    [(> i len)
-	     #t]
-	    [else
-	     (inner (add1 i) (cdr lis))])))
-
-  ;string user -> returns false if input wasn't recieved
-  (define (handle-string user str)
-    (if (equal? "" str) ;if they didn't say anything
+  (define env (make-environment
+		(cons "quit" 
+		      (lambda (env rest user str)
+			(display "Bye\r\n" (user-out user)) 
+			(flush-output (user-out user))
+			(set-user-kill! user #t) ;set the user's killswitch to true
+			#t))
+		(cons "global-quit"
+		      (lambda (env rest user str)
+			(display "Server killed\n")
+			(flush-output)
+			(set-box! (user-global-kill user) #t)
+			#t))
+		(cons "name"
+		      (lambda (env rest user str)
+			(if (list-longer rest -1)
+			    (set-user-name! user (car rest))
+			    (begin
+			      (fprintf (user-out user) 
+				       "Enter a name after \"name\" next time\r\n")
+			      (flush-output (user-out user))))
+			#t))
+		(cons "say"
+		      (lambda (env rest user str)
+			(printf "~a said: ~a\r\n" (user-name user) (substring str 4))
+			(flush-output)
+			(apply-userlist
+			 (lambda (u x)
+			   (unless (equal? (user-name u) (user-name user))
+			     (fprintf (user-out u) "~a says: ~a\r\n" 
+				      (user-name user) 
+				      (substring str 4))
+			     (flush-output (user-out u))))
+			 (user-parent user))
+			#t))
+		(cons "users"
+		      (lambda (env rest user str)
+			(fprintf (user-out user) "~a Users\r\n"
+				 (userlist-count (user-parent user)))
+			(apply-userlist
+			 (lambda (u x)
+			   (fprintf (user-out user) "~a\r\n"
+				    (user-name u)))
+			 (user-parent user))
+			(flush-output (user-out user))
+			#t))
+		(cons "log"
+		      (lambda (env rest user str)
+			(fprintf (user-out user) "log here:\r\n")
+			(print-log user (user-out user))
+			(flush-output (user-out user))
+			#t))))
+    
+  (define (handle-string! user str)
+    (if (equal? "" str)
 	#f
-	(begin ;if they did
-	  (let ((message (split-str str #\space)))
-	    (add-log! user str) ;add it to our message log
-	    (cond [(equal? "quit" str) ;if it was "quit" (or some other quit message in the future
-		   (display "Bye\r\n" (user-out user)) 
-		   (flush-output (user-out user))
-		   (set-user-kill! user #t) ;set the user's killswitch to true
-		   #t]
-		  [(equal? "global-quit" str) ;if we're killing the server
-		   (display "Server killed\n")
-		   (flush-output)
-		   (set-box! (user-global-kill user) #t)
-		   #t]
-		  [(equal? "name" (car message))
-		   (if (list-longer message 0)
-		       (set-user-name! user (cadr message))
-		       (begin
-			 (fprintf (user-out user) 
-				  "Enter a name after \"name\" next time\r\n")
-			 (flush-output (user-out user))))]
-		  [else ;else handle it normally
-		   (fprintf (user-out user) "~a Users\r\n" 
-			    (userlist-count (user-parent user)))
-		   (flush-output (user-out user))
-		   (printf "~a said: ~a\r\n" (user-name user) str)
-		   (flush-output)
-		   (apply-userlist 
-		    (lambda (u x)
-		      (unless (equal? (user-name u) (car x))
-			(fprintf (user-out u) "~a says: ~a\r\n" (user-name user) str)
-			(flush-output (user-out u))))
-		    (user-parent user)
-		    (user-name user))
-		   #t])))))
-
+	(begin
+	  (add-log! user str) ;add string to user's log
+	  (printf "~a executed: ~a\r\n" (user-name user) str) ;print user name and execution
+	  (flush-output)
+	  (if (parse-string str env user str) ;if the str relates to a verb in the environment
+	      #t ;return true
+	      (begin
+		(fprintf (user-out user) "Say something sensible, man.\r\n")
+		(flush-output (user-out user))
+		#t)))))
+  
   ;;gets input from the users in socket, then handles it
   (define (input-handle user . rest)
     (unless (or (user-kill user)
@@ -134,7 +127,7 @@
 					 (cond [(eq? c #\return) #f]
 					       [(eq? c #\newline) #f]
 					       [else #t])))))
-	(handle-string user str))))
+	(handle-string! user str))))
 
   (define (accept-make-user server ulist)
     (define-values (s-in s-out) (tcp-accept server))
@@ -169,5 +162,9 @@
 	(set-userlist-users! users (apply-remove-userlist connection-killed-close! users))
 	(loop)))
     (close-all-connections users server))
+
+  (begin-server (if (string? (outport))
+		    (string->number (outport))
+		    (outport)))
 
   (provide begin-server outport))
