@@ -11,12 +11,11 @@
   (define (add-log! user str)
     (set-user-log! user (cons str (user-log user))))
 
-  (define (print-log user)
+  (define (print-log user (port (current-output-port)))
     (let inner ((log (user-log user)))
       (unless (null? log)
 	(inner (cdr log))
-	(display (car log))
-	(newline))))
+	(fprintf port "~a\r\n" (car log)))))
 
   (define (make-user (parent #f) (in #f) (out #f) (global-kill #f) (name "nameless-user"))
     (user parent
@@ -63,13 +62,4 @@
 	    [else ;function has applied and returned true
 	     (cons (car users) (inner (cdr users)))])))
   
-  (provide (struct-out user)
-	   (struct-out userlist)
-	   add-user!
-	   add-log!
-	   print-log
-	   apply-remove-userlist
-	   apply-userlist
-	   make-userlist
-	   make-user))
-	   
+  (provide (all-defined-out)))
