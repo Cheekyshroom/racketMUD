@@ -77,9 +77,4 @@
 	    (combinator-fn n (loop (add1 i)))
 	    n))))
 
-  (provide 2d-vector->nodes
-	   make-corridor
-	   (struct-out node)
-	   node-exits
-	   make-node
-	   node-add!))
+  (provide (all-defined-out)))
