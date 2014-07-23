@@ -50,11 +50,4 @@
 	    (loop (add1 x) w)))
 	(loop (add1 y) h))))
 
-  (provide (struct-out 2d-vector)
-	   make-2d-vector
-	   2d-vector
-	   2d-vector-get
-	   2d-vector-set!
-	   2d-vector-get-safe
-	   2d-vector-apply!
-	   vector->2d-vector))
+  (provide (all-defined-out)))
